@@ -42,6 +42,12 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
     async def get_energy_usage(self) -> dict:
         """Fetches and updates energy usage data."""
         energy_usage = await self.api.fetch_energy_stdcheck()
+        if energy_usage is None:
+            LOGGER.warning("Energy usage fetch returned None, keeping existing data")
+            return self._device_info
+        if "list" not in energy_usage:
+            LOGGER.warning("Energy usage response missing 'list' key: %s", energy_usage)
+            return self._device_info
         self._device_info.update({
             "data": energy_usage,
             "sync_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -79,7 +85,11 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         match = re.search(pattern, unique_id)
         if match:
             energy_type, data_type = match.group(1), match.group(2)
-            for data_entry in self._device_info["data"]["list"]:
+            data = self._device_info.get("data")
+            if not data or "list" not in data:
+                LOGGER.debug("Energy data not yet available for %s", unique_id)
+                return None
+            for data_entry in data["list"]:
                 if (data_entry["energy"] == energy_type
                     and data_entry["date"] == target_date
                 ):
