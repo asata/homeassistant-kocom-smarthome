@@ -3,9 +3,6 @@
 # KOCOM Samrt Home
 코콤 스마트홈+ 사용자를 위한 홈 어시스턴트 통합.
 
-> [!WARNING]
-> DEPRECATED: 더 이상 관리되지 않습니다. e편한세상 스마트홈 2.0 앱을 사용하는 경우 [해당 컴포넌트](https://github.com/lunDreame/homeassistant-daelim-smarthome)를 사용해 보세요.
-
 ## 기여
 
 코콤 스마트홈에 문제가 있나요? [Issues](https://github.com/lunDreame/homeassistant-kocom-smarthome/issues) 탭을 열어 작성해 주세요
