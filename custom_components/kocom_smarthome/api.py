@@ -366,17 +366,17 @@ class KocomSmartHomeAPI:
         try:
             device_type = control_response.get("type")
             entries = control_response.get("entry", [])
-            
+
             if not (device_type and entries):
-                LOGGER.error(f"Device {device_type}: Missing required data in control response")
-            
+                LOGGER.error("Device %s: Missing required data in control response", device_type)
+                return
+
             device_entries = self.device_settings.get(device_type, {}).get("data", {}).get("entry", [])
             target_entry = next((e for e in device_entries if e.get("id") == entries[0].get("id")), None)
 
             if target_entry:
                 target_entry["list"] = entries[0].get("list", [])[:len(target_entry.get("list", []))]
-                #LOGGER.info(f"Device {device_type}: Successfully updated entry {entries[0].get('id')}")
             else:
-                LOGGER.error(f"Device {device_type}: Entry {entries[0].get('id')} not found")
+                LOGGER.error("Device %s: Entry %s not found", device_type, entries[0].get("id"))
         except Exception as ex:
-            LOGGER.error(f"Device {device_type}: Update failed - {str(ex)}")
+            LOGGER.error("Device update failed - %s", str(ex))

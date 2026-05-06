@@ -18,7 +18,6 @@ from .api import parse_device_info
 
 class KocomSmartHomeCoordinator(DataUpdateCoordinator):
     """Kocom Smart Home update coordinator."""
-    _irdev = False
 
     def __init__(self, name, api, hass, entry) -> None:
         """Initializes coordinator."""
@@ -26,15 +25,16 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         self.api = api
         self.hass = hass
         self.entry = entry
+        self._irdev = False
         name_interval = f"{name}_interval"
         update_interval = entry.data[name_interval]
-        
+
         if name in ["light", "concent", "heat", "aircon"]:
             self._irdev = True
             self._device_info = api.device_settings[name]
         else:
             self._device_info = {"data": {}, "sync_date": ""}
-            
+
         super().__init__(
             hass, LOGGER, name=name, update_interval=timedelta(seconds=update_interval)
         )
@@ -61,10 +61,18 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         else:
             device_state = await self.api.check_device_status(self.name)
 
-        if device_state["type"] == "totalcontrol" and device_state["entry"]:  
-            # 0: totalcontrol, 1: totalelevator       
-            entry_to_list = device_state["entry"][0]["list"][0]
-            entry_to_list["value"] = ~int(entry_to_list["value"]) & 1
+        if device_state is None:
+            LOGGER.warning("Device status fetch returned None for %s, keeping existing data", self.name)
+            return self._device_info
+
+        if device_state.get("type") == "totalcontrol":
+            entries = device_state.get("entry", [])
+            if entries and entries[0].get("list"):
+                # 0: totalcontrol, 1: totalelevator
+                entry_to_list = entries[0]["list"][0]
+                entry_to_list["value"] = ~int(entry_to_list.get("value", 0)) & 1
+            else:
+                LOGGER.debug("Totalcontrol entry or list is missing in device_state")
 
         power_key = "totallight" if self.name == "totalcontrol" else "power"
         data_updates = {
@@ -83,19 +91,27 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         """Returns energy usage state for given ID and date."""
         pattern = r"(elec|gas|water|hotwater|heat).*?(value|avg|price)"
         match = re.search(pattern, unique_id)
-        if match:
-            energy_type, data_type = match.group(1), match.group(2)
-            data = self._device_info.get("data")
-            if not data or "list" not in data:
-                LOGGER.debug("Energy data not yet available for %s", unique_id)
-                return None
-            for data_entry in data["list"]:
-                if (data_entry["energy"] == energy_type
-                    and data_entry["date"] == target_date
-                ):
-                    return data_entry[data_type]
-        else:
+        if not match:
             LOGGER.warning("Invalid energy usage ID format: %s", unique_id)
+            return None
+
+        energy_type, data_type = match.group(1), match.group(2)
+        data = self._device_info.get("data")
+        if not data or "list" not in data:
+            LOGGER.debug("Energy data not yet available for %s", unique_id)
+            return None
+
+        for data_entry in data["list"]:
+            if (data_entry["energy"] == energy_type
+                and data_entry["date"] == target_date
+            ):
+                return data_entry.get(data_type)
+
+        LOGGER.debug(
+            "No matching energy entry found for type=%s, date=%s (id=%s)",
+            energy_type, target_date, unique_id
+        )
+        return None
     
     def get_device_status(self, unique_id: str = None, function: str = "power") -> bool:
         """Returns device power state."""
@@ -115,14 +131,11 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
 
         if unique_id.startswith(("vent", "gas", "totalcontrol")):
             if unique_id.startswith("totalcontrol"):
-                value = ~value & 1 
+                value = ~value & 1
                 function = "totallight"
         elif unique_id.startswith(("lt", "ct")):
             value *= 255
             function = id_parts[1]
-
-        if function != "power":
-            function = function
 
         return id, function, value
 
@@ -157,11 +170,18 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         id, function, value = self._interpret_command(unique_id, value, function)
         ctrl_resp = await self.api.send_control_request(self.name, id, function, value)
 
+        if ctrl_resp is None:
+            LOGGER.warning(
+                "Control request returned None for %s (id=%s, function=%s), skipping state update",
+                self.name, id, function
+            )
+            return
+
         if self._irdev:
             self.api.update_device_data(ctrl_resp)
         else:
             await self.get_single_device(ctrl_resp)
-        
+
         await self.async_request_refresh()
 
     async def specify_elements(self) -> list:
@@ -169,7 +189,12 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         energy_usage = await self.get_energy_usage()
         devices = []
 
-        for usage_device_info in energy_usage["data"]["list"]:
+        usage_list = energy_usage.get("data", {}).get("list")
+        if not usage_list:
+            LOGGER.warning("Energy usage list is empty or unavailable, returning no elements")
+            return devices
+
+        for usage_device_info in usage_list:
             is_prev_month = self._is_previous_month(usage_device_info["date"])
             prev_suffix = "_previous" if is_prev_month else ""
             energy_type = usage_device_info["energy"]
