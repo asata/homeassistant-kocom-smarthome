@@ -9,7 +9,7 @@ LOGGER = logging.getLogger(__name__)
 
 NAME = "코콤 스마트홈"
 DOMAIN = "kocom_smarthome"
-VERSION = "1.1.14"
+VERSION = "1.1.15"
 
 REQUEST_TIMEOUT = 5
 

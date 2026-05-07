@@ -42,12 +42,56 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
     async def get_energy_usage(self) -> dict:
         """Fetches and updates energy usage data."""
         energy_usage = await self.api.fetch_energy_stdcheck()
+        
         if energy_usage is None:
             LOGGER.warning("Energy usage fetch returned None, keeping existing data")
             return self._device_info
-        if "list" not in energy_usage:
-            LOGGER.warning("Energy usage response missing 'list' key: %s", energy_usage)
+
+        # Midnight debug logging to investigate month transition
+        now = datetime.now()
+        if now.hour == 0:
+            LOGGER.info(
+                "[Midnight Transition Data] Time: %s, Response: %s",
+                now.strftime("%H:%M:%S"),
+                energy_usage
+            )
+
+        if "error" in energy_usage and energy_usage.get("error") != 0:
+            LOGGER.warning(
+                "Energy usage API error: %s (code: %s)",
+                energy_usage.get("error-msg", "Unknown Error"),
+                energy_usage.get("error", "Unknown")
+            )
             return self._device_info
+
+        usage_list = energy_usage.get("list")
+        if not usage_list:
+            LOGGER.warning("Energy usage response missing 'list' key or list is empty: %s", energy_usage)
+            return self._device_info
+
+        # Month-aware data integrity check for electricity to prevent glitches
+        new_elec = next((e for e in usage_list if e.get("energy") == "elec"), None)
+        if new_elec:
+            new_val = new_elec.get("value", 0)
+            new_date = str(new_elec.get("date", "")).split()[0] # YYYY-MM-DD or YYYY-MM
+            
+            old_usage_list = self._device_info.get("data", {}).get("list", [])
+            old_elec = next((e for e in old_usage_list if e.get("energy") == "elec"), None)
+            
+            if old_elec:
+                old_val = old_elec.get("value", 0)
+                old_date = str(old_elec.get("date", "")).split()[0]
+                
+                # Compare only if the month is the same (comparing YYYY-MM)
+                if new_date[:7] == old_date[:7] and new_date[:7] != "":
+                    if new_val < old_val:
+                        LOGGER.warning(
+                            "Electricity usage decreased within the same month (%s -> %s, date: %s). "
+                            "Suspecting API glitch, keeping existing data.",
+                            old_val, new_val, new_date
+                        )
+                        return self._device_info
+
         self._device_info.update({
             "data": energy_usage,
             "sync_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")

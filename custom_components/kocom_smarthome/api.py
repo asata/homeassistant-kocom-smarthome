@@ -144,6 +144,10 @@ class KocomSmartHomeAPI:
 
         await self.fetch_apartment_server_token()
 
+        if not self.apartment_tokens.get("nonce") or not self.apartment_tokens.get("cookie"):
+            LOGGER.error("Cannot fetch energy usage: Apartment authentication tokens are missing")
+            return None
+
         headers = {
             "Authorization": generate_digest_header(
                 self.user_credentials["user_id"],
