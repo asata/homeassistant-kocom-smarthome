@@ -40,21 +40,12 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         )
     
     async def get_energy_usage(self) -> dict:
-        """Fetches and updates energy usage data."""
+        """Fetches and updates energy usage data with robustness checks."""
         energy_usage = await self.api.fetch_energy_stdcheck()
         
         if energy_usage is None:
             LOGGER.warning("Energy usage fetch returned None, keeping existing data")
             return self._device_info
-
-        # Midnight debug logging to investigate month transition
-        now = datetime.now()
-        if now.hour == 0:
-            LOGGER.info(
-                "[Midnight Transition Data] Time: %s, Response: %s",
-                now.strftime("%H:%M:%S"),
-                energy_usage
-            )
 
         if "error" in energy_usage and energy_usage.get("error") != 0:
             LOGGER.warning(
@@ -64,33 +55,73 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
             )
             return self._device_info
 
-        usage_list = energy_usage.get("list")
-        if not usage_list:
-            LOGGER.warning("Energy usage response missing 'list' key or list is empty: %s", energy_usage)
+        new_list = energy_usage.get("list", [])
+        if not new_list:
+            LOGGER.warning("[ASATA] Energy usage response missing 'list' key or list is empty: %s", energy_usage)
             return self._device_info
 
-        # Month-aware data integrity check for electricity to prevent glitches
-        new_elec = next((e for e in usage_list if e.get("energy") == "elec"), None)
-        if new_elec:
-            new_val = new_elec.get("value", 0)
-            new_date = str(new_elec.get("date", "")).split()[0] # YYYY-MM-DD or YYYY-MM
+        # Log raw data from API for better traceability
+        LOGGER.info(
+            "[ASATA] Fetched energy usage from API: %s", 
+            [{e.get("energy"): e.get("value"), "date": e.get("date")} for e in new_list]
+        )
+
+        # Prepare for merging and validation
+        old_data = self._device_info.get("data", {})
+        old_list = old_data.get("list", [])
+        
+        # We will build a new list by merging the existing entries with new ones
+        merged_list = list(old_list)
+        
+        for new_entry in new_list:
+            energy_type = new_entry.get("energy")
+            new_val = new_entry.get("value", 0)
+            new_date = str(new_entry.get("date", "")).strip()
+            new_month = new_date[:7]
             
-            old_usage_list = self._device_info.get("data", {}).get("list", [])
-            old_elec = next((e for e in old_usage_list if e.get("energy") == "elec"), None)
+            if not energy_type or not new_month:
+                continue
+
+            # Find matching entry in the merged list by energy type and month
+            idx = -1
+            for i, entry in enumerate(merged_list):
+                if entry.get("energy") == energy_type and str(entry.get("date", ""))[:7] == new_month:
+                    idx = i
+                    break
             
-            if old_elec:
-                old_val = old_elec.get("value", 0)
-                old_date = str(old_elec.get("date", "")).split()[0]
+            if idx >= 0:
+                old_val = merged_list[idx].get("value", 0)
+                # Integrity check: energy usage should not decrease within the same month
+                if new_val < old_val:
+                    LOGGER.warning(
+                        "[ASATA] Energy usage for %s decreased within month %s (%s -> %s). "
+                        "Suspecting API glitch, skipping update for this entry.",
+                        energy_type, new_month, old_val, new_val
+                    )
+                    continue
                 
-                # Compare only if the month is the same (comparing YYYY-MM)
-                if new_date[:7] == old_date[:7] and new_date[:7] != "":
-                    if new_val < old_val:
-                        LOGGER.warning(
-                            "Electricity usage decreased within the same month (%s -> %s, date: %s). "
-                            "Suspecting API glitch, keeping existing data.",
-                            old_val, new_val, new_date
-                        )
-                        return self._device_info
+                if new_val > old_val:
+                    LOGGER.info(
+                        "[ASATA] Updating energy %s for %s: %s -> %s",
+                        energy_type, new_month, old_val, new_val
+                    )
+                # Update existing entry with newer data
+                merged_list[idx] = new_entry
+            else:
+                # New entry (e.g. first run of the month or new month)
+                LOGGER.info(
+                    "[ASATA] Adding new energy entry: %s, value: %s, date: %s",
+                    energy_type, new_val, new_date
+                )
+                merged_list.append(new_entry)
+
+        # Update the data structure with the merged list
+        energy_usage["list"] = merged_list
+        
+        LOGGER.debug(
+            "[ASATA] Final merged energy data to be applied: %s",
+            [{e.get("energy"): e.get("value"), "date": e.get("date")} for e in merged_list]
+        )
 
         self._device_info.update({
             "data": energy_usage,
@@ -132,7 +163,7 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
         return self._device_info
     
     def _energy_usage_state(self, unique_id: str, target_date: str) -> dict:
-        """Returns energy usage state for given ID and date."""
+        """Returns energy usage state for given ID and date with flexible matching."""
         pattern = r"(elec|gas|water|hotwater|heat).*?(value|avg|price)"
         match = re.search(pattern, unique_id)
         if not match:
@@ -145,9 +176,12 @@ class KocomSmartHomeCoordinator(DataUpdateCoordinator):
             LOGGER.debug("Energy data not yet available for %s", unique_id)
             return None
 
+        target_month = str(target_date)[:7]
         for data_entry in data["list"]:
-            if (data_entry["energy"] == energy_type
-                and data_entry["date"] == target_date
+            entry_date = str(data_entry.get("date", ""))
+            # Match by exact date or same month (to handle API date format variations)
+            if (data_entry.get("energy") == energy_type
+                and (entry_date == target_date or (entry_date[:7] == target_month and target_month != ""))
             ):
                 return data_entry.get(data_type)
 
